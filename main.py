@@ -3,207 +3,131 @@ import pandas as pd
 import pdfplumber
 import re
 import unicodedata
-import shelve
+import os
 from datetime import datetime, timedelta
 
+# Configuração da página
 st.set_page_config(page_title="Gestão HH Automação", layout="wide")
 
-# --- FUNÇÕES DE PERSISTÊNCIA EM DISCO ---
-DB_FILE = "dados_planejamento.db"
+# --- LISTA OFICIAL DA SUPERVISÃO ---
+EQUIPE = ["ALESSANDRO", "ANDRÉ P", "DIENIFER", "ELCIO", "EDILON", "GILMAR", "JOSÉ GERALDO", "SAMUELL"]
 
-def salvar_dados(db_pd, arquivos, folgas):
-    with shelve.open(DB_FILE) as db:
-        db['db_pd'] = db_pd
-        db['arquivos_processados'] = arquivos
-        db['folgas'] = folgas
-
-def carregar_dados():
-    with shelve.open(DB_FILE) as db:
-        return (db.get('db_pd', pd.DataFrame()), 
-                db.get('arquivos_processados', []), 
-                db.get('folgas', []))
-
-# Carrega os dados do "baú" para a sessão atual
-if 'db_pd' not in st.session_state:
-    st.session_state.db_pd, st.session_state.arquivos_processados, st.session_state.folgas = carregar_dados()
-
-# --- EQUIPE E AUXILIARES ---
-EQUIPE_AUTOMACAO = ["ALESSANDRO", "ANDRÉ P", "DIENIFER", "ELCIO", "EDILON", "GILMAR", "JOSÉ GERALDO", "SAMUELL"]
-
-def remover_acentos(txt):
+def normalizar(txt):
     if not txt: return ""
-    return "".join(c for c in unicodedata.normalize('NFD', str(txt).upper()) if unicodedata.category(c) != 'Mn')
+    return "".join(c for c in unicodedata.normalize('NFD', str(txt).upper()) if unicodedata.category(c) != 'Mn').strip()
 
-def identificar_colaborador(texto_celula):
-    texto = remover_acentos(texto_celula)
-    if "GERALDO" in texto: return "JOSÉ GERALDO"
-    if "EDILON" in texto: return "EDILON"
-    if "ALESSANDRO" in texto: return "ALESSANDRO"
-    if "ANDRE" in texto: return "ANDRÉ P"
-    if "DIENIFER" in texto: return "DIENIFER"
-    if "ELCIO" in texto: return "ELCIO"
-    if "GILMAR" in texto: return "GILMAR"
-    if "SAMUELL" in texto: return "SAMUELL"
+def identificar_colab(texto):
+    t = normalizar(texto)
+    # Mapeamento para garantir que José Geraldo e Edilon sejam pegos mesmo com nomes parciais
+    if "GERALDO" in t: return "JOSÉ GERALDO"
+    if "EDILON" in t: return "EDILON"
+    for nome in EQUIPE:
+        if normalizar(nome) in t: return nome
     return None
 
-def limpar_colunas(lista_colunas):
-    nova_lista = []
-    counts = {}
-    for col in lista_colunas:
-        nome = str(col).replace('\n', ' ').strip() if col else "Vazia"
-        if nome in counts:
-            counts[nome] += 1
-            nova_lista.append(f"{nome}_{counts[nome]}")
-        else:
-            counts[nome] = 0
-            nova_lista.append(nome)
-    return nova_lista
-
-st.title("📊 Gestão de Planejamento - Automação")
-
-# --- SIDEBAR ---
-st.sidebar.header("📁 Banco de Dados")
-uploaded_files = st.sidebar.file_uploader("Adicionar novos PDFs", type="pdf", accept_multiple_files=True)
-jornada_disp = st.sidebar.number_input("Jornada Diária (HH)", value=8.0)
-
-with st.sidebar.expander("🏖️ Registrar Folga"):
-    c_folga = st.selectbox("Colaborador", EQUIPE_AUTOMACAO)
-    d_ini = st.date_input("Início")
-    d_fim = st.date_input("Fim")
-    if st.button("Salvar Folga"):
-        dias = (d_fim - d_ini).days + 1
-        for i in range(dias):
-            dia = d_ini + timedelta(days=i)
-            st.session_state.folgas.append({"Colaborador": c_folga, "Data": dia, "Mês": dia.strftime('%m - %B'), "HH_Folga": jornada_disp})
-        salvar_dados(st.session_state.db_pd, st.session_state.arquivos_processados, st.session_state.folgas)
-        st.success("Folga registrada e salva!")
-
-if st.sidebar.button("🗑️ RESET TOTAL (Apagar histórico)"):
-    import os
-    for ext in ['', '.bak', '.dat', '.dir']:
-        if os.path.exists(DB_FILE + ext): os.remove(DB_FILE + ext)
-    st.session_state.db_pd = pd.DataFrame()
-    st.session_state.arquivos_processados = []
-    st.session_state.folgas = []
-    st.rerun()
-
-# --- PROCESSAMENTO ---
-if uploaded_files:
-    houve_mudanca = False
-    for file in uploaded_files:
-        if file.name not in st.session_state.arquivos_processados:
-            with pdfplumber.open(file) as pdf:
-                rows = []
-                for p in pdf.pages:
-                    table = p.extract_table()
-                    if table: rows.extend(table)
-                
-                if rows:
-                    df_raw = pd.DataFrame(rows)
-                    h_idx = 0
-                    for i, r in df_raw.iterrows():
-                        if "supervisão" in " ".join(map(str, r)).lower():
-                            h_idx = i; break
-                    
-                    df = df_raw.drop(range(h_idx + 1)).reset_index(drop=True)
-                    df.columns = limpar_colunas(df_raw.iloc[h_idx])
-                    
-                    try:
-                        col_sup = [c for c in df.columns if 'Supervisão' in c][0]
-                        col_rec = [c for c in df.columns if 'recursos' in c.lower() or 'Nomes' in c][0]
-                        col_dur = [c for c in df.columns if 'Duração' in c][0]
-                        col_dat = [c for c in df.columns if any(x in c for x in ['Início', 'Data', 'Termino'])][0]
-
-                        df_aut = df[df[col_sup].str.contains('Automação', case=False, na=False)].copy()
-                        
-                        dt_obj = datetime.now()
-                        try: 
-                            dt_s = re.search(r'\d{2}/\d{2}/\d{2}', str(df_aut[col_dat].iloc[0])).group()
-                            dt_obj = datetime.strptime(dt_s, '%d/%m/%y')
-                        except: pass
-
-                        df_aut['HH_Val'] = df_aut[col_dur].apply(lambda x: int(re.findall(r'\d+', str(x))[0])/60 if re.findall(r'\d+', str(x)) else 0)
-                        df_aut['Executante'] = df_aut[col_rec].str.split(';')
-                        df_exp = df_aut.explode('Executante')
-                        df_exp['Colaborador'] = df_exp['Executante'].apply(identificar_colaborador)
-                        df_exp = df_exp.dropna(subset=['Colaborador'])
-                        
-                        df_exp['Data'] = dt_obj.date()
-                        df_exp['Mês'] = dt_obj.strftime('%m - %B')
-                        
-                        st.session_state.db_pd = pd.concat([st.session_state.db_pd, df_exp], ignore_index=True)
-                        st.session_state.arquivos_processados.append(file.name)
-                        houve_mudanca = True
-                    except Exception as e:
-                        st.error(f"Erro no arquivo {file.name}: {e}")
-    
-    if houve_mudanca:
-        salvar_dados(st.session_state.db_pd, st.session_state.arquivos_processados, st.session_state.folgas)
-
-# --- DASHBOARD ---
-if not st.session_state.db_pd.empty or st.session_state.folgas:
-    df_m = st.session_state.db_pd
-    df_f = pd.DataFrame(st.session_state.folgas)
-    
-    st.write("### 🔍 Filtros")
-    c1, c2 = st.columns(2)
-    m_list = sorted(list(set(df_m['Mês'].unique() if not df_m.empty else []) | set(df_f['Mês'].unique() if not df_f.empty else [])))
-    sel_mes = c1.multiselect("Meses", m_list, default=m_list)
-    sel_col = c2.multiselect("Equipe", EQUIPE_AUTOMACAO, default=EQUIPE_AUTOMACAO)
-    
-    tab1, tab2, tab3 = st.tabs(["🌎 Geral", "📅 Diário", "🏖️ Folgas"])
-
-    with tab1:
-        dias_no_periodo = df_m[df_m['Mês'].isin(sel_mes)]['Data'].nunique() if not df_m.empty else 0
-        if not df_m.empty:
-            df_g = df_m[(df_m['Mês'].isin(sel_mes)) & (df_m['Colaborador'].isin(sel_col))]
-            res_prog = df_g.groupby('Colaborador')['HH_Val'].sum().reset_index()
-        else:
-            res_prog = pd.DataFrame(columns=['Colaborador', 'HH_Val'])
-
-        res_final = pd.DataFrame({'Colaborador': sel_col})
-        res_final = res_final.merge(res_prog, on='Colaborador', how='left').fillna(0)
+# --- PROCESSAMENTO DO PDF ---
+def extrair_dados_pdf(file):
+    with pdfplumber.open(file) as pdf:
+        dados = []
+        for page in pdf.pages:
+            table = page.extract_table()
+            if table: dados.extend(table)
         
-        if not df_f.empty:
-            df_folga_mes = df_f[df_f['Mês'].isin(sel_mes)]
-            if not df_folga_mes.empty:
-                res_folga = df_folga_mes.groupby('Colaborador')['Data'].count().reset_index()
-                res_folga.columns = ['Colaborador', 'Dias Folga']
-                res_final = res_final.merge(res_folga, on='Colaborador', how='left').fillna(0)
-            else: res_final['Dias Folga'] = 0
-        else: res_final['Dias Folga'] = 0
+        df_raw = pd.DataFrame(dados)
+        # Localiza o cabeçalho dinamicamente
+        h_idx = 0
+        for i, row in df_raw.iterrows():
+            if "supervisão" in " ".join(map(str, row)).lower():
+                h_idx = i
+                break
+        
+        df = df_raw.drop(range(h_idx + 1)).reset_index(drop=True)
+        headers = [str(c).replace('\n', ' ').strip() for c in df_raw.iloc[h_idx]]
+        
+        # Deduplicação manual de colunas
+        new_cols = []
+        for i, v in enumerate(headers):
+            new_cols.append(f"{v}_{i}" if headers.count(v) > 1 else v)
+        df.columns = new_cols
+        
+        # Filtro de Automação
+        col_sup = [c for c in df.columns if 'Supervisão' in c][0]
+        df = df[df[col_sup].str.contains('Automação', case=False, na=False)].copy()
+        
+        # Identifica colunas de interesse
+        col_rec = [c for c in df.columns if 'recursos' in c.lower() or 'Nomes' in c][0]
+        col_dur = [c for c in df.columns if 'Duração' in c][0]
+        col_dat = [c for c in df.columns if any(x in c for x in ['Início', 'Data'])][0]
+        
+        # Extração de Data
+        dt_str = re.search(r'\d{2}/\d{2}/\d{2}', str(df[col_dat].iloc[0])).group()
+        data_ref = datetime.strptime(dt_str, '%d/%m/%y').date()
+        
+        # Processamento de HH e Colaboradores
+        df['HH'] = df[col_dur].apply(lambda x: int(re.findall(r'\d+', str(x))[0])/60 if re.findall(r'\d+', str(x)) else 0)
+        df['Lista_Rec'] = df[col_rec].str.split('\n') # PDF 19.01 usa quebra de linha
+        df = df.explode('Lista_Rec')
+        df['Colaborador'] = df['Lista_Rec'].apply(identificar_colab)
+        
+        return df.dropna(subset=['Colaborador'])[['Colaborador', 'HH', 'Data']].assign(Mês=data_ref.strftime('%m - %B'), Data=data_ref)
 
-        res_final['N° de dias computados'] = (dias_no_periodo - res_final['Dias Folga']).clip(lower=0)
-        res_final['HH Disponível'] = res_final['N° de dias computados'] * jornada_disp
-        res_final['HH Programado'] = res_final['HH_Val']
-        res_final['Saldo HH'] = res_final['HH Disponível'] - res_final['HH Programado']
-        res_final['% Carga'] = (res_final['HH Programado'] / res_final['HH Disponível'] * 100).fillna(0).round(1)
+# --- PERSISTÊNCIA ---
+if 'historico' not in st.session_state:
+    st.session_state.historico = pd.DataFrame()
+if 'folgas' not in st.session_state:
+    st.session_state.folgas = pd.DataFrame(columns=['Colaborador', 'Data'])
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Arquivos/Dias no Período", int(dias_no_periodo))
-        m2.metric("HH Total Disponível", f"{res_final['HH Disponível'].sum():.1f}h")
-        m3.metric("HH Total Programado", f"{res_final['HH Programado'].sum():.1f}h")
+st.sidebar.header("⚙️ Configurações")
+files = st.sidebar.file_uploader("Carregar Programação (PDF)", accept_multiple_files=True)
+jornada = st.sidebar.number_input("Jornada Diária HH", value=8.0)
 
-        st.dataframe(res_final[['Colaborador', 'N° de dias computados', 'HH Disponível', 'HH Programado', 'Saldo HH', '% Carga']], use_container_width=True)
+if files:
+    for f in files:
+        # Evita duplicar o mesmo arquivo na memória
+        if f.name not in st.session_state.get('arquivos_lidos', []):
+            novo_df = extrair_dados_pdf(f)
+            st.session_state.historico = pd.concat([st.session_state.historico, novo_df]).drop_duplicates()
+            if 'arquivos_lidos' not in st.session_state: st.session_state.arquivos_lidos = []
+            st.session_state.arquivos_lidos.append(f.name)
 
-    with tab2:
-        if not df_m.empty:
-            df_dia_f = df_m[(df_m['Mês'].isin(sel_mes)) & (df_m['Colaborador'].isin(sel_col))]
-            for d in sorted(df_dia_f['Data'].unique(), reverse=True):
-                st.write(f"📅 **{d.strftime('%d/%m/%Y')}**")
-                res_d = df_dia_f[df_dia_f['Data'] == d].groupby('Colaborador')['HH_Val'].sum().reset_index()
-                base_dia = pd.DataFrame({'Colaborador': sel_col})
-                quem_folga = df_f[df_f['Data'] == d]['Colaborador'].tolist() if not df_f.empty else []
-                res_d = base_dia.merge(res_d, on='Colaborador', how='left').fillna(0)
-                res_d = res_d[~res_d['Colaborador'].isin(quem_folga)]
-                res_d['HH Disponível'] = jornada_disp
-                res_d['Saldo HH'] = jornada_disp - res_d['HH_Val']
-                res_d['% Carga'] = (res_d['HH_Val'] / jornada_disp * 100).round(1)
-                st.table(res_d[['Colaborador', 'HH Disponível', 'HH_Val', 'Saldo HH', '% Carga']])
+# --- LÓGICA DE FOLGAS ---
+with st.sidebar.expander("🏖️ Lançar Folgas"):
+    c_folga = st.selectbox("Colaborador", EQUIPE)
+    d_folga = st.date_input("Data da Folga")
+    if st.button("Registrar"):
+        nova_folga = pd.DataFrame([{'Colaborador': c_folga, 'Data': d_folga}])
+        st.session_state.folgas = pd.concat([st.session_state.folgas, nova_folga]).drop_duplicates()
 
-    with tab3:
-        if not df_f.empty:
-            st.write("#### Ausências Registradas")
-            st.dataframe(df_f[df_f['Mês'].isin(sel_mes)], use_container_width=True)
-else:
-    st.info("Nenhum dado salvo. Carregue os PDFs para começar.")
+# --- EXIBIÇÃO ---
+if not st.session_state.historico.empty:
+    df = st.session_state.historico
+    dias_totais = df['Data'].nunique()
+    
+    st.subheader("📊 Relatório de Carga Anual/Período")
+    
+    # Cálculo de disponibilidade real (Dias totais - Folgas)
+    res = []
+    for nome in EQUIPE:
+        hh_prog = df[df['Colaborador'] == nome]['HH'].sum()
+        folgas_colab = len(st.session_state.folgas[(st.session_state.folgas['Colaborador'] == nome)])
+        dias_uteis = dias_totais - folgas_colab
+        hh_disp = dias_uteis * jornada
+        
+        res.append({
+            "Colaborador": nome,
+            "Dias Computados": dias_uteis,
+            "HH Disponível": hh_disp,
+            "HH Programado": hh_prog,
+            "HH Sem Apropriação": hh_disp - hh_prog,
+            "% Carga": round((hh_prog / hh_disp * 100), 1) if hh_disp > 0 else 0
+        })
+    
+    st.table(pd.DataFrame(res))
+
+    st.subheader("📅 Visão por Dia")
+    col1, col2 = st.columns(2)
+    f_mes = col1.multiselect("Filtrar Mês", df['Mês'].unique(), default=df['Mês'].unique())
+    f_col = col2.multiselect("Filtrar Colaborador", EQUIPE, default=EQUIPE)
+    
+    view_dia = df[(df['Mês'].isin(f_mes)) & (df['Colaborador'].isin(f_col))]
+    st.dataframe(view_dia, use_container_width=True)
