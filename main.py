@@ -180,3 +180,4 @@ if not st.session_state['db_pd'].empty or st.session_state['folgas']:
             st.write("---")
             st.write("📜 **Lista de Datas de Folga:**")
             st.write(df_folga_f[['Colaborador', 'Data', 'Mês']])
+                
