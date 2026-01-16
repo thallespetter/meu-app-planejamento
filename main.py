@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
-import fitz  # PyMuPDF - O motor mais rápido para PDF
+import fitz  # PyMuPDF
 import re
 import unicodedata
 import io
 from datetime import datetime, timedelta
 
-# Configuração da página
+# Configuração da página para máxima performance
 st.set_page_config(page_title="Gestão HH Automação", layout="wide")
 
 # --- INICIALIZAÇÃO DA MEMÓRIA ---
@@ -31,26 +31,27 @@ def identificar_colab(texto):
         if normalizar(nome) in t: return nome
     return None
 
-@st.cache_data(show_spinner=False)
-def extrair_dados_pdf_ultra_fast(file_bytes, file_name):
+def extrair_dados_pdf_seguro(file_obj):
     try:
+        file_bytes = file_obj.getvalue()
+        if not file_bytes: return pd.DataFrame()
+            
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         dados_lista = []
         data_ref = datetime.now().date()
         
-        # Pega a data do texto da primeira página
         primeira_pag_texto = doc[0].get_text()
         dt_match = re.search(r'\d{2}/\d{2}/\d{2}', primeira_pag_texto)
         if dt_match:
-            data_ref = datetime.strptime(dt_match.group(), '%d/%m/%y').date()
+            try:
+                data_ref = datetime.strptime(dt_match.group(), '%d/%m/%y').date()
+            except: pass
 
-        # Extração de tabelas ultra-rápida
         for page in doc:
             tabs = page.find_tables()
             for tab in tabs:
                 df = tab.to_pandas()
                 df.columns = [str(c).lower().replace('\n', ' ') for c in df.columns]
-                
                 idx_sup = next((c for c in df.columns if 'superv' in c), None)
                 idx_rec = next((c for c in df.columns if 'recursos' in c or 'nomes' in c), None)
                 idx_dur = next((c for c in df.columns if 'dura' in c or 'ssuorra' in c), None)
@@ -70,7 +71,8 @@ def extrair_dados_pdf_ultra_fast(file_bytes, file_name):
                                 })
         doc.close()
         return pd.DataFrame(dados_lista)
-    except Exception:
+    except Exception as e:
+        st.error(f"Erro no processamento: {e}")
         return pd.DataFrame()
 
 # --- SIDEBAR ---
@@ -82,11 +84,11 @@ if uploaded_files:
     for f in uploaded_files:
         if f.name not in st.session_state.arquivos_lidos:
             with st.spinner(f"Lendo {f.name}..."):
-                f_bytes = f.read()
-                res = extrair_dados_pdf_ultra_fast(f_bytes, f.name)
+                res = extrair_dados_pdf_seguro(f)
                 if not res.empty:
                     st.session_state.db_pd = pd.concat([st.session_state.db_pd, res], ignore_index=True).drop_duplicates()
                     st.session_state.arquivos_lidos.append(f.name)
+                    st.rerun()
 
 # Filtros
 st.sidebar.markdown("---")
@@ -113,9 +115,9 @@ with st.sidebar.expander("🏖️ Lançar Folga"):
             novas.append({'Colaborador': c_f, 'Data': curr})
             curr += timedelta(days=1)
         st.session_state.folgas = pd.concat([st.session_state.folgas, pd.DataFrame(novas)]).drop_duplicates()
-        st.success("OK!")
+        st.success("Folga registrada!")
 
-if st.sidebar.button("🗑️ Reset"):
+if st.sidebar.button("🗑️ Resetar Sistema"):
     st.session_state.db_pd = pd.DataFrame()
     st.session_state.arquivos_lidos = []
     st.session_state.folgas = pd.DataFrame(columns=['Colaborador', 'Data'])
@@ -143,20 +145,21 @@ if not df_filtrado.empty:
         })
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Dias Computados", n_dias)
+    c1.metric("Nº de Dias Computados", n_dias)
     c2.metric("Total HH Disponível", f"{total_disp:.1f}h")
     c3.metric("Total HH Programado", f"{total_prog:.1f}h")
-    c4.metric("% Carga Total", f"{(total_prog/total_disp*100 if total_disp > 0 else 0):.1f}%")
+    carga_total = (total_prog / total_disp * 100) if total_disp > 0 else 0
+    c4.metric("% Carga Total", f"{carga_total:.1f}%")
     
     st.table(pd.DataFrame(tabela_resumo))
 
-    t1, t2, t3 = st.tabs(["📅 Detalhe Diário", "🏖️ Folgas", "📊 Resumo Folgas"])
+    t1, t2, t3 = st.tabs(["📅 Detalhe Diário", "🏖️ Folgas Concedidas", "📊 Resumo de Folgas"])
     with t1:
         for d in sorted(dias_u, reverse=True):
-            with st.expander(f"Dia {d.strftime('%d/%m/%Y')}"):
-                st.dataframe(df_filtrado[df_filtrado['Data'] == d].groupby('Colaborador')['HH'].sum().reset_index())
+            with st.expander(f"Programação do dia {d.strftime('%d/%m/%Y')}"):
+                st.dataframe(df_filtrado[df_filtrado['Data'] == d].groupby('Colaborador')['HH'].sum().reset_index(), use_container_width=True)
     with t2:
-        st.dataframe(st.session_state.folgas[st.session_state.folgas['Colaborador'].isin(f_colab)])
+        st.dataframe(st.session_state.folgas[st.session_state.folgas['Colaborador'].isin(f_colab)], use_container_width=True)
     with t3:
         res_f = []
         for p in f_colab:
@@ -164,4 +167,4 @@ if not df_filtrado.empty:
             res_f.append({"Colaborador": p, "Total Horas Folga": h_f})
         st.table(pd.DataFrame(res_f))
 else:
-    st.info("Carregue os PDFs para visualizar os indicadores.")
+    st.info("Por favor, carregue os arquivos PDF na barra lateral para gerar os indicadores.")
