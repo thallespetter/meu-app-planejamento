@@ -45,7 +45,7 @@ def extrair_dados_pdf(file):
             h_idx = None
             for i, row in df_raw.iterrows():
                 row_str = " ".join([str(x) for x in row if x]).lower()
-                if "supervisão" in row_str or "recursos" in row_str:
+                if "supervisão" in row_str:
                     h_idx = i
                     break
             
@@ -54,21 +54,25 @@ def extrair_dados_pdf(file):
             headers = [str(c).lower().replace('\n', ' ') for c in df_raw.iloc[h_idx]]
             df = df_raw.drop(range(h_idx + 1)).reset_index(drop=True)
             
-            # Identificação de colunas por palavra-chave (mais seguro)
-            idx_sup = next(i for i, h in enumerate(headers) if 'superv' in h)
-            idx_rec = next(i for i, h in enumerate(headers) if 'recursos' in h or 'nomes' in h)
-            idx_dur = next(i for i, h in enumerate(headers) if 'dura' in h)
-            idx_dat = next(i for i, h in enumerate(headers) if any(x in h for x in ['início', 'data', 'começo']))
+            # Identificação de colunas por palavra-chave (mais robusto para variações como 'Dssuorraaçsão')
+            idx_sup = next((i for i, h in enumerate(headers) if 'superv' in h), None)
+            idx_rec = next((i for i, h in enumerate(headers) if 'recursos' in h or 'nomes' in h), None)
+            idx_dur = next((i for i, h in enumerate(headers) if 'dura' in h or 'ssuorra' in h), None)
+            idx_dat = next((i for i, h in enumerate(headers) if any(x in h for x in ['início', 'data', 'começo'])), None)
+
+            if None in [idx_sup, idx_rec, idx_dur, idx_dat]:
+                return pd.DataFrame()
 
             # Filtro Automação
             df = df[df[idx_sup].astype(str).str.contains('Automação', case=False, na=False)].copy()
+            if df.empty: return pd.DataFrame()
             
-            # Extrair Data (importante para o 19.01.pdf)
+            # Extrair Data (Suporta formato DD/MM/YY do PDF 19.01)
             primeira_data_celula = str(df[idx_dat].iloc[0]).replace('\n', ' ')
             dt_match = re.search(r'\d{2}/\d{2}/\d{2}', primeira_data_celula)
             data_ref = datetime.strptime(dt_match.group(), '%d/%m/%y').date() if dt_match else datetime.now().date()
             
-            # Tratamento de HH e Nomes (Limpando quebras de linha do PDF)
+            # Tratamento de HH e Nomes
             def limpar_hh(val):
                 nums = re.findall(r'\d+', str(val).replace('\n', ''))
                 return int(nums[0])/60 if nums else 0
@@ -131,7 +135,7 @@ if not st.session_state.db_pd.empty:
     
     # 1. INDICADORES GERAIS (ANO/PERÍODO)
     st.subheader("📈 Indicadores Consolidados")
-    dias_unicos = hist['Data'].unique()
+    dias_unicos = sorted(hist['Data'].unique())
     n_dias_computados = len(dias_unicos)
     
     col1, col2, col3, col4 = st.columns(4)
@@ -159,7 +163,7 @@ if not st.session_state.db_pd.empty:
     st.table(pd.DataFrame(resumo_anual))
 
     # 2. ABAS DE DETALHAMENTO
-    tab1, tab2 = st.tabs(["📅 Detalhe Diário", "🏖️ Folgas Concedidas"])
+    tab1, tab2, tab3 = st.tabs(["📅 Detalhe Diário", "🏖️ Folgas Concedidas", "📊 Resumo de Folgas"])
     
     with tab1:
         for d in sorted(dias_unicos, reverse=True):
@@ -173,6 +177,20 @@ if not st.session_state.db_pd.empty:
             st.dataframe(folgas.sort_values(by='Data', ascending=False), use_container_width=True)
         else:
             st.info("Nenhuma folga registrada até o momento.")
+
+    with tab3:
+        st.subheader("Resumo de Horas de Folga por Colaborador")
+        resumo_folgas = []
+        for p in EQUIPE:
+            # Total de dias de folga registrados (independente de ter PDF)
+            total_dias_f = folgas[folgas['Colaborador'] == p].shape[0]
+            total_hh_f = total_dias_f * jornada_h
+            resumo_folgas.append({
+                "Colaborador": p,
+                "Total Dias Folga": total_dias_f,
+                "Total Horas Folga": round(total_hh_f, 1)
+            })
+        st.table(pd.DataFrame(resumo_folgas))
 
 else:
     st.info("Por favor, carregue os arquivos PDF na barra lateral para gerar os indicadores.")
