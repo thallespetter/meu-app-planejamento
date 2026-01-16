@@ -3,6 +3,7 @@ import pandas as pd
 import pdfplumber
 import re
 import unicodedata
+import io
 from datetime import datetime, timedelta
 
 # Configuração da página
@@ -31,13 +32,20 @@ def identificar_colab(texto):
     return None
 
 @st.cache_data(show_spinner=False)
-def extrair_dados_pdf(file_content, file_name):
+def extrair_dados_pdf_robusto(file_bytes, file_name):
     try:
-        with pdfplumber.open(file_content) as pdf:
+        # Processamento via BytesIO para evitar AxiosError (Network Error)
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             dados = []
             for page in pdf.pages:
-                table = page.extract_table()
-                if table: dados.extend(table)
+                # Estratégia de extração otimizada para tabelas complexas
+                table = page.extract_table({
+                    "vertical_strategy": "lines", 
+                    "horizontal_strategy": "lines",
+                })
+                if table:
+                    dados.extend(table)
+                page.flush_cache() # Limpeza de memória imediata
             
             if not dados: return pd.DataFrame()
             
@@ -86,7 +94,7 @@ def extrair_dados_pdf(file_content, file_name):
                 'Ano': data_ref.year,
                 'Mês': data_ref.strftime('%m - %B')
             })
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
 # --- SIDEBAR ---
@@ -94,21 +102,23 @@ st.sidebar.header("📁 Entrada de Dados")
 uploaded_files = st.sidebar.file_uploader("Carregar PDFs", type="pdf", accept_multiple_files=True)
 jornada_h = st.sidebar.number_input("Jornada Diária (HH)", value=8.0)
 
-# Processamento de arquivos
 if uploaded_files:
     for f in uploaded_files:
         if f.name not in st.session_state.arquivos_lidos:
-            res = extrair_dados_pdf(f, f.name)
+            file_bytes = f.read() # Leitura única dos bytes
+            res = extrair_dados_pdf_robusto(file_bytes, f.name)
             if not res.empty:
                 st.session_state.db_pd = pd.concat([st.session_state.db_pd, res], ignore_index=True)
                 st.session_state.arquivos_lidos.append(f.name)
+            else:
+                st.sidebar.warning(f"Aviso: {f.name} não contém dados de Automação ou formato inválido.")
 
 # Filtros na Sidebar
 st.sidebar.markdown("---")
 st.sidebar.header("🔍 Filtros de Visualização")
 if not st.session_state.db_pd.empty:
     anos = sorted(st.session_state.db_pd['Ano'].unique())
-    meses = sorted(st.session_state.db_pd['Mês'].unique())
+    meses = sorted(st.session_state.db_pd['Mês'].unique(), key=lambda x: x.split(' - ')[0])
     
     filtro_ano = st.sidebar.multiselect("Ano", anos, default=anos)
     filtro_mes = st.sidebar.multiselect("Mês", meses, default=meses)
@@ -147,13 +157,11 @@ if not st.session_state.db_pd.empty:
         (st.session_state.folgas['Colaborador'].isin(filtro_colab))
     ]
 
-    # --- DASHBOARD DE INDICADORES ---
     if not df_filtrado.empty:
         st.subheader("📈 Indicadores Consolidados")
         dias_unicos = sorted(df_filtrado['Data'].unique())
         n_dias = len(dias_unicos)
         
-        # Cálculos Globais
         total_hh_prog = df_filtrado['HH'].sum()
         total_hh_disp = 0
         resumo_tabela = []
@@ -176,7 +184,6 @@ if not st.session_state.db_pd.empty:
                 "% de Carga": f"{carga:.1f}%"
             })
 
-        # Exibição dos KPIs de Topo
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Nº de Dias Computados", n_dias)
         c2.metric("Total HH Disponível", f"{total_hh_disp:.1f}h")
@@ -186,7 +193,6 @@ if not st.session_state.db_pd.empty:
         
         st.table(pd.DataFrame(resumo_tabela))
 
-        # --- ABAS ---
         tab1, tab2, tab3 = st.tabs(["📅 Detalhe Diário", "🏖️ Folgas Concedidas", "📊 Resumo de Folgas"])
         
         with tab1:
