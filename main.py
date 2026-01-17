@@ -1,5 +1,5 @@
 # ============================================================
-# main.py — PLANEJAMENTO DE HH (VERSÃO ESTÁVEL + EXTRAÇÃO DE PDF)
+# main.py — PLANEJAMENTO DE HH (VERSÃO CORRIGIDA E ESTÁVEL)
 # ============================================================
 
 import streamlit as st
@@ -51,16 +51,15 @@ def save_json(obj, path):
 
 # ============================================================
 # EXTRAÇÃO DE DADOS DO PDF
-# Espera linhas no formato:
-# COLABORADOR | DD/MM/YYYY | HH
-# Ex: João Silva | 12/01/2026 | 8
+# FORMATO ESPERADO:
+# Nome Colaborador | DD/MM/YYYY | HH
 # ============================================================
 def extrair_dados_pdf(pdf_bytes):
     registros = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
     padrao = re.compile(
-        r"(?P<col>.+?)\s+\|\s+(?P<data>\d{2}/\d{2}/\d{4})\s+\|\s+(?P<hh>\d+(?:\.\d+)?)"
+        r"(?P<col>[A-Za-zÀ-ÿ\s]+)\s*\|\s*(?P<data>\d{2}/\d{2}/\d{4})\s*\|\s*(?P<hh>\d+(?:[.,]\d+)?)"
     )
 
     for page in doc:
@@ -71,7 +70,7 @@ def extrair_dados_pdf(pdf_bytes):
                 registros.append({
                     "Colaborador": m.group("col").strip(),
                     "Data": pd.to_datetime(m.group("data"), dayfirst=True),
-                    "HH": float(m.group("hh"))
+                    "HH": float(m.group("hh").replace(",", "."))
                 })
 
     return pd.DataFrame(registros)
@@ -93,7 +92,7 @@ if "arquivos" not in st.session_state:
 # ============================================================
 st.sidebar.header("Configuração de Jornada")
 jornada_h = st.sidebar.number_input(
-    "Jornada diária efetiva (h)", 1.0, 12.0, 8.0, 0.5
+    "Jornada diária efetiva (h)", min_value=1.0, max_value=12.0, value=8.0, step=0.5
 )
 
 # ============================================================
@@ -106,22 +105,22 @@ pdfs = st.sidebar.file_uploader(
 )
 
 if pdfs:
-    novos_registros = []
+    novos = []
     for f in pdfs:
         if f.name not in st.session_state.arquivos:
             df_pdf = extrair_dados_pdf(f.read())
             if not df_pdf.empty:
-                novos_registros.append(df_pdf)
+                novos.append(df_pdf)
             st.session_state.arquivos.append(f.name)
 
-    if novos_registros:
+    if novos:
         st.session_state.db = pd.concat(
-            [st.session_state.db] + novos_registros,
+            [st.session_state.db] + novos,
             ignore_index=True
         ).drop_duplicates()
-
         save_df(st.session_state.db, DB_FILE)
         save_json(st.session_state.arquivos, ARQ_FILE)
+        st.rerun()
 
 if st.session_state.arquivos:
     arq_excluir = st.sidebar.selectbox(
@@ -130,7 +129,7 @@ if st.session_state.arquivos:
     if arq_excluir and st.sidebar.button("Excluir PDF"):
         st.session_state.arquivos.remove(arq_excluir)
         save_json(st.session_state.arquivos, ARQ_FILE)
-        st.sidebar.warning("Arquivo removido (dados permanecem)")
+        st.sidebar.success("Arquivo removido da lista (dados preservados)")
 
 if st.sidebar.button("Limpar todo cache do sistema"):
     for f in [DB_FILE, AUS_FILE, ARQ_FILE]:
@@ -140,30 +139,34 @@ if st.sidebar.button("Limpar todo cache do sistema"):
     st.rerun()
 
 # ============================================================
-# FILTROS
+# PREPARAÇÃO BASE (ANTES DOS FILTROS)
+# ============================================================
+db = st.session_state.db.copy()
+if not db.empty:
+    db["Data"] = pd.to_datetime(db["Data"])
+
+# ============================================================
+# SIDEBAR — FILTROS (SEMPRE VISÍVEIS)
 # ============================================================
 st.sidebar.header("Filtros")
 
-if not st.session_state.db.empty:
-    st.session_state.db["Data"] = pd.to_datetime(st.session_state.db["Data"])
-
-anos = sorted(st.session_state.db["Data"].dt.year.unique()) if not st.session_state.db.empty else []
+anos = sorted(db["Data"].dt.year.unique().tolist()) if not db.empty else []
 meses = list(range(1, 13))
-colabs = sorted(st.session_state.db["Colaborador"].unique()) if not st.session_state.db.empty else []
+colabs = sorted(db["Colaborador"].unique().tolist()) if not db.empty else []
 
 f_anos = st.sidebar.multiselect("Ano", anos, default=anos)
 f_meses = st.sidebar.multiselect("Mês", meses, default=meses)
 f_colabs = st.sidebar.multiselect("Colaborador", colabs, default=colabs)
 
 # ============================================================
-# BASE FILTRADA
+# APLICA FILTROS
 # ============================================================
-df = st.session_state.db.copy()
-if not df.empty:
+df = db.copy()
+if not df.empty and f_anos and f_meses and f_colabs:
     df = df[
-        df["Data"].dt.year.isin(f_anos)
-        & df["Data"].dt.month.isin(f_meses)
-        & df["Colaborador"].isin(f_colabs)
+        df["Data"].dt.year.isin(f_anos) &
+        df["Data"].dt.month.isin(f_meses) &
+        df["Colaborador"].isin(f_colabs)
     ]
 
 # ============================================================
@@ -171,7 +174,7 @@ if not df.empty:
 # ============================================================
 st.header("Ausências")
 
-with st.expander("➕ Lançar / 🗑️ Excluir Ausência", expanded=False):
+with st.expander("➕ Lançar / 🗑️ Excluir Ausência"):
     if colabs:
         col = st.selectbox("Colaborador", colabs)
         tipo = st.selectbox("Tipo de Ausência", TIPOS_AUSENCIA)
@@ -186,10 +189,12 @@ with st.expander("➕ Lançar / 🗑️ Excluir Ausência", expanded=False):
                 "Tipo": tipo
             })
             st.session_state.ausencias = pd.concat(
-                [st.session_state.ausencias, novos]
+                [st.session_state.ausencias, novos],
+                ignore_index=True
             ).drop_duplicates()
             save_df(st.session_state.ausencias, AUS_FILE)
             st.success("Ausência registrada")
+            st.rerun()
 
     if not st.session_state.ausencias.empty:
         idx = st.selectbox(
@@ -205,13 +210,12 @@ with st.expander("➕ Lançar / 🗑️ Excluir Ausência", expanded=False):
             st.session_state.ausencias = st.session_state.ausencias.drop(idx)
             save_df(st.session_state.ausencias, AUS_FILE)
             st.warning("Ausência removida")
+            st.rerun()
 
 # ============================================================
 # BASE DIÁRIA
 # ============================================================
-base = pd.DataFrame(
-    columns=["Colaborador", "Data", "HH_Programado", "HH_Disponivel", "Tipo"]
-)
+base = pd.DataFrame()
 
 if not df.empty:
     prog = (
@@ -245,7 +249,9 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # RESUMO GERAL
 # ============================================================
 with tab1:
-    if not base.empty:
+    if base.empty:
+        st.info("Nenhum dado disponível para o período selecionado.")
+    else:
         resumo = base.groupby("Colaborador", as_index=False).agg(
             Dias=("Data", "count"),
             HH_Disponivel=("HH_Disponivel", "sum"),
@@ -262,7 +268,9 @@ with tab1:
 # RELATÓRIO DIÁRIO
 # ============================================================
 with tab2:
-    if not base.empty:
+    if base.empty:
+        st.info("Nenhum dado diário disponível.")
+    else:
         diario = base.copy()
         diario["%Carga Dia"] = diario.apply(
             lambda r: r["HH_Programado"] / r["HH_Disponivel"]
@@ -281,35 +289,30 @@ with tab3:
 # RESUMO GERAL DE AFASTAMENTOS
 # ============================================================
 with tab4:
-    if not base.empty:
+    if base.empty:
+        st.info("Nenhum afastamento para o período.")
+    else:
         aus_calc = base[base["Tipo"].isin(["FOLGA", "AFASTAMENTO"])]
         dias = (
-            aus_calc.groupby(["Colaborador", "Tipo"], as_index=False)
+            aus_calc.groupby(["Colaborador", "Tipo"])
             .size()
-            .rename(columns={"size": "Dias"})
+            .unstack(fill_value=0)
+            .reset_index()
         )
-
-        tabela = dias.pivot_table(
-            index="Colaborador",
-            columns="Tipo",
-            values="Dias",
-            fill_value=0
-        ).reset_index()
 
         totais = base.groupby("Colaborador", as_index=False).agg(
             HH_Prog=("HH_Programado", "sum"),
             HH_Disp=("HH_Disponivel", "sum")
         )
 
-        tabela = tabela.merge(totais, on="Colaborador", how="left")
+        tabela = dias.merge(totais, on="Colaborador", how="left")
 
-        tabela["% Ausência vs Programado"] = (
-            (tabela.get("FOLGA", 0) + tabela.get("AFASTAMENTO", 0)) * jornada_h
-        ) / tabela["HH_Prog"].replace(0, pd.NA)
+        horas_aus = (
+            tabela.get("FOLGA", 0) + tabela.get("AFASTAMENTO", 0)
+        ) * jornada_h
 
-        tabela["% Ausência vs Disponível"] = (
-            (tabela.get("FOLGA", 0) + tabela.get("AFASTAMENTO", 0)) * jornada_h
-        ) / tabela["HH_Disp"].replace(0, pd.NA)
+        tabela["% Ausência vs Programado"] = horas_aus / tabela["HH_Prog"].replace(0, pd.NA)
+        tabela["% Ausência vs Disponível"] = horas_aus / tabela["HH_Disp"].replace(0, pd.NA)
 
         st.dataframe(tabela.fillna(0), use_container_width=True)
 
