@@ -1,5 +1,5 @@
 # ============================================================
-# main.py — PLANEJAMENTO DE HH (VERSÃO CORRIGIDA E ESTÁVEL)
+# main.py — PLANEJAMENTO DE HH (VERSÃO ESTÁVEL SEM FILTRO DE ANO/COLABORADOR)
 # ============================================================
 
 import streamlit as st
@@ -11,13 +11,10 @@ import re
 from email.message import EmailMessage
 import smtplib
 
-# ============================================================
-# CONFIGURAÇÃO STREAMLIT
-# ============================================================
 st.set_page_config(page_title="Planejamento de HH", layout="wide")
 
 # ============================================================
-# PATHS E CONSTANTES
+# PATHS
 # ============================================================
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -29,7 +26,7 @@ ARQ_FILE = os.path.join(DATA_DIR, "arquivos.json")
 TIPOS_AUSENCIA = ["BANCO DE HORAS", "FOLGA", "FÉRIAS", "AFASTAMENTO"]
 
 # ============================================================
-# FUNÇÕES DE PERSISTÊNCIA
+# FUNÇÕES BÁSICAS
 # ============================================================
 def load_df(path, cols):
     if os.path.exists(path):
@@ -50,9 +47,8 @@ def save_json(obj, path):
         json.dump(obj, f)
 
 # ============================================================
-# EXTRAÇÃO DE DADOS DO PDF
-# FORMATO ESPERADO:
-# Nome Colaborador | DD/MM/YYYY | HH
+# EXTRAÇÃO DE PDF
+# FORMATO: Nome | DD/MM/YYYY | HH
 # ============================================================
 def extrair_dados_pdf(pdf_bytes):
     registros = []
@@ -92,11 +88,11 @@ if "arquivos" not in st.session_state:
 # ============================================================
 st.sidebar.header("Configuração de Jornada")
 jornada_h = st.sidebar.number_input(
-    "Jornada diária efetiva (h)", min_value=1.0, max_value=12.0, value=8.0, step=0.5
+    "Jornada diária efetiva (h)", 1.0, 12.0, 8.0, 0.5
 )
 
 # ============================================================
-# SIDEBAR — UPLOAD DE PDFs
+# SIDEBAR — PDFs
 # ============================================================
 st.sidebar.header("Arquivos PDF")
 
@@ -129,7 +125,7 @@ if st.session_state.arquivos:
     if arq_excluir and st.sidebar.button("Excluir PDF"):
         st.session_state.arquivos.remove(arq_excluir)
         save_json(st.session_state.arquivos, ARQ_FILE)
-        st.sidebar.success("Arquivo removido da lista (dados preservados)")
+        st.sidebar.success("Arquivo removido da lista")
 
 if st.sidebar.button("Limpar todo cache do sistema"):
     for f in [DB_FILE, AUS_FILE, ARQ_FILE]:
@@ -139,35 +135,11 @@ if st.sidebar.button("Limpar todo cache do sistema"):
     st.rerun()
 
 # ============================================================
-# PREPARAÇÃO BASE (ANTES DOS FILTROS)
+# BASE PRINCIPAL
 # ============================================================
 db = st.session_state.db.copy()
 if not db.empty:
     db["Data"] = pd.to_datetime(db["Data"])
-
-# ============================================================
-# SIDEBAR — FILTROS (SEMPRE VISÍVEIS)
-# ============================================================
-st.sidebar.header("Filtros")
-
-anos = sorted(db["Data"].dt.year.unique().tolist()) if not db.empty else []
-meses = list(range(1, 13))
-colabs = sorted(db["Colaborador"].unique().tolist()) if not db.empty else []
-
-f_anos = st.sidebar.multiselect("Ano", anos, default=anos)
-f_meses = st.sidebar.multiselect("Mês", meses, default=meses)
-f_colabs = st.sidebar.multiselect("Colaborador", colabs, default=colabs)
-
-# ============================================================
-# APLICA FILTROS
-# ============================================================
-df = db.copy()
-if not df.empty and f_anos and f_meses and f_colabs:
-    df = df[
-        df["Data"].dt.year.isin(f_anos) &
-        df["Data"].dt.month.isin(f_meses) &
-        df["Colaborador"].isin(f_colabs)
-    ]
 
 # ============================================================
 # AUSÊNCIAS
@@ -175,6 +147,8 @@ if not df.empty and f_anos and f_meses and f_colabs:
 st.header("Ausências")
 
 with st.expander("➕ Lançar / 🗑️ Excluir Ausência"):
+    colabs = sorted(db["Colaborador"].unique()) if not db.empty else []
+
     if colabs:
         col = st.selectbox("Colaborador", colabs)
         tipo = st.selectbox("Tipo de Ausência", TIPOS_AUSENCIA)
@@ -217,9 +191,9 @@ with st.expander("➕ Lançar / 🗑️ Excluir Ausência"):
 # ============================================================
 base = pd.DataFrame()
 
-if not df.empty:
+if not db.empty:
     prog = (
-        df.groupby(["Colaborador", "Data"], as_index=False)
+        db.groupby(["Colaborador", "Data"], as_index=False)
         .agg(HH_Programado=("HH", "sum"))
     )
     prog["HH_Disponivel"] = jornada_h
@@ -250,7 +224,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # ============================================================
 with tab1:
     if base.empty:
-        st.info("Nenhum dado disponível para o período selecionado.")
+        st.info("Nenhum dado disponível.")
     else:
         resumo = base.groupby("Colaborador", as_index=False).agg(
             Dias=("Data", "count"),
@@ -290,7 +264,7 @@ with tab3:
 # ============================================================
 with tab4:
     if base.empty:
-        st.info("Nenhum afastamento para o período.")
+        st.info("Nenhum afastamento disponível.")
     else:
         aus_calc = base[base["Tipo"].isin(["FOLGA", "AFASTAMENTO"])]
         dias = (
