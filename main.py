@@ -1,5 +1,5 @@
 # ============================================================
-# main.py — APLICATIVO DE PLANEJAMENTO DE HH (VERSÃO CORRIGIDA)
+# main.py — APLICATIVO DE PLANEJAMENTO DE HH (VERSÃO ESTÁVEL)
 # ============================================================
 
 import streamlit as st
@@ -172,24 +172,4 @@ with st.expander("➕ Lançar / 🗑️ Excluir Ausência", expanded=False):
 # ============================================================
 # BASE DIÁRIA (SEMPRE EXISTE)
 # ============================================================
-base = pd.DataFrame(
-    columns=[
-        "Colaborador", "Data",
-        "HH_Programado", "HH_Disponivel",
-        "Tipo"
-    ]
-)
-
-if not df.empty:
-    prog = (
-        df.groupby(["Colaborador", "Data"])
-        .agg(HH_Programado=("HH", "sum"))
-        .reset_index()
-    )
-
-    prog["HH_Disponivel"] = jornada_h
-
-    aus = st.session_state.ausencias.copy()
-    aus["Data"] = pd.to_datetime(aus["Data"])
-
-    base = prog.merge(aus, on=["Colaborador",]()
+base =
