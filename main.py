@@ -184,13 +184,14 @@ if uploaded_files:
                     salvar_arquivos(st.session_state.arquivos_lidos)
                     st.rerun()
 
-# --- NOVO: EXCLUIR PDF CARREGADO ---
 if st.session_state.arquivos_lidos:
     with st.sidebar.expander("🗑️ Excluir PDF Carregado"):
         arq_para_excluir = st.selectbox("Selecionar Arquivo", st.session_state.arquivos_lidos)
         if st.button("Confirmar Exclusão Arquivo"):
             st.session_state.arquivos_lidos.remove(arq_para_excluir)
             if not st.session_state.db_pd.empty:
+                if "Arquivo" not in st.session_state.db_pd.columns:
+                    st.session_state.db_pd["Arquivo"] = "Desconhecido"
                 st.session_state.db_pd = st.session_state.db_pd[st.session_state.db_pd["Arquivo"] != arq_para_excluir]
             salvar_db(st.session_state.db_pd)
             salvar_arquivos(st.session_state.arquivos_lidos)
@@ -248,7 +249,6 @@ with st.sidebar.expander("🏖️ Lançar Ausência"):
         salvar_folgas(st.session_state.folgas)
         st.success("Registro salvo!")
 
-# --- NOVO: EXCLUIR AUSÊNCIA ---
 if not st.session_state.folgas.empty:
     with st.sidebar.expander("🗑️ Excluir Ausência"):
         folgas_view = st.session_state.folgas.copy()
@@ -307,11 +307,18 @@ if not df_filtrado.empty:
             "% Carga": f"{carga:.1f}%"
         })
 
-    c1, c2, c3, c4 = st.columns(4)
+    # Novo Indicador: % Ausência Geral
+    total_hh_ausencia = st.session_state.folgas[
+        st.session_state.folgas["Data"].isin(dias_u)
+    ].shape[0] * jornada_h
+    perc_ausencia_total = (total_hh_ausencia / (total_disp + total_hh_ausencia) * 100) if (total_disp + total_hh_ausencia) > 0 else 0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Dias Computados", n_dias)
     c2.metric("HH Disponível", f"{total_disp:.1f}")
     c3.metric("HH Programado", f"{total_prog:.1f}")
     c4.metric("% Carga Total", f"{(total_prog / total_disp * 100) if total_disp > 0 else 0:.1f}%")
+    c5.metric("% Ausência Geral", f"{perc_ausencia_total:.1f}%")
 
     st.table(pd.DataFrame(tabela))
 
@@ -320,24 +327,17 @@ if not df_filtrado.empty:
     with t1:
         for d in sorted(dias_u, reverse=True):
             with st.expander(f"Programação {d.strftime('%d/%m/%Y')}"):
-                # Filtrar dados do dia
                 df_dia = df_filtrado[df_filtrado["Data"] == d]
-                
-                # Criar base com todos da equipe filtrada para garantir que apareçam mesmo sem HH
                 resumo_dia = []
                 for p in f_colab:
                     hh_prog = df_dia[df_dia["Colaborador"] == p]["HH"].sum()
-                    
-                    # Verificar se está de folga no dia
                     is_folga = not st.session_state.folgas[
                         (st.session_state.folgas["Colaborador"] == p) & 
                         (st.session_state.folgas["Data"] == d)
                     ].empty
-                    
                     hh_plan = 0.0 if is_folga else jornada_h
                     hh_n_prog = max(0.0, hh_plan - hh_prog)
                     perc = (hh_prog / hh_plan * 100) if hh_plan > 0 else 0.0
-                    
                     resumo_dia.append({
                         "Colaborador": p,
                         "HH Planejado": hh_plan,
@@ -345,7 +345,6 @@ if not df_filtrado.empty:
                         "HH Não Programado": round(hh_n_prog, 2),
                         "% Programado": f"{perc:.1f}%"
                     })
-                
                 st.dataframe(pd.DataFrame(resumo_dia), use_container_width=True)
 
     with t2:
@@ -369,6 +368,19 @@ if not df_filtrado.empty:
                 fill_value=0
             ).reset_index()
 
+            # Função para cálculo da coluna % Ausência/Disponível
+            def calcular_perc_ausencia(row):
+                colab = row["Colaborador"]
+                total_horas_ausente = row.drop("Colaborador").sum()
+                dados_colab = next((item for item in tabela if item["Colaborador"] == colab), None)
+                if dados_colab:
+                    hh_disponivel = dados_colab["HH Disponível"]
+                    total_potencial = hh_disponivel + total_horas_ausente
+                    if total_potencial > 0:
+                        return f"{(total_horas_ausente / total_potencial * 100):.1f}%"
+                return "0.0%"
+
+            tabela_resumo["% Ausência/Disponível"] = tabela_resumo.apply(calcular_perc_ausencia, axis=1)
             st.dataframe(tabela_resumo, use_container_width=True)
         else:
             st.info("Nenhuma ausência registrada.")
