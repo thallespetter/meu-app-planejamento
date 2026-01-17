@@ -121,7 +121,7 @@ def extrair_dados_pdf_seguro(file_obj):
         return pd.DataFrame()
 
 def enviar_email(destinatarios, senha, assunto, corpo_html):
-    SMTP_SERVER = "smtp.office365.com"  # Padrão ArcelorMittal (Outlook)
+    SMTP_SERVER = "smtp.office365.com" 
     SMTP_PORT = 587
     SMTP_USER = "thalles.batista@arcelormittal.com.br"
 
@@ -138,8 +138,7 @@ def enviar_email(destinatarios, senha, assunto, corpo_html):
         server.sendmail(SMTP_USER, destinatarios.split(','), msg.as_string())
         server.quit()
         return True
-    except Exception as e:
-        st.sidebar.error(f"Erro de conexão: Verifique sua senha ou permissões SMTP. Detalhe: {e}")
+    except:
         return False
 
 # =========================================================
@@ -202,6 +201,7 @@ if not st.session_state.folgas.empty:
             salvar_folgas(st.session_state.folgas)
             st.rerun()
 
+# --- CAMPO DE E-MAIL ---
 with st.sidebar.expander("📧 Enviar Relatório"):
     dest_mail = st.text_input("Enviar para (e-mail)")
     pass_mail = st.text_input("Sua senha de login", type="password")
@@ -209,10 +209,13 @@ with st.sidebar.expander("📧 Enviar Relatório"):
         if dest_mail and pass_mail and not df_filtrado.empty:
             corpo = f"<h2>Relatório de Planejamento HH - Automação</h2><p>Extraído em: {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>"
             corpo += "<h4>Resumo de Carga:</h4>" + pd.DataFrame(st.session_state.tabela_cache).to_html(index=False)
+            
             if enviar_email(dest_mail, pass_mail, "Relatório Gestão HH Automação", corpo):
-                st.success("Relatório enviado!")
+                st.success("E-mail enviado com sucesso")
+            else:
+                st.error("Impossível enviar o e-mail")
         else:
-            st.error("Preencha o destinatário, senha e garanta que existam dados no filtro.")
+            st.warning("Preencha todos os campos e filtre os dados.")
 
 if st.sidebar.button("⚠️ Resetar Sistema"):
     for f in [DB_FILE, FOLGAS_FILE, ARQS_FILE]:
