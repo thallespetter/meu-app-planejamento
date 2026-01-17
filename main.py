@@ -172,4 +172,142 @@ with st.expander("➕ Lançar / 🗑️ Excluir Ausência", expanded=False):
 # ============================================================
 # BASE DIÁRIA (SEMPRE EXISTE)
 # ============================================================
-base =
+base = pd.DataFrame(
+    columns=[
+        "Colaborador", "Data",
+        "HH_Programado", "HH_Disponivel",
+        "Tipo"
+    ]
+)
+
+if not df.empty:
+    prog = (
+        df.groupby(["Colaborador", "Data"])
+        .agg(HH_Programado=("HH", "sum"))
+        .reset_index()
+    )
+
+    prog["HH_Disponivel"] = jornada_h
+
+    aus = st.session_state.ausencias.copy()
+    aus["Data"] = pd.to_datetime(aus["Data"])
+
+    base = prog.merge(
+        aus,
+        on=["Colaborador", "Data"],
+        how="left"
+    )
+
+    # FÉRIAS, AFASTAMENTO e BANCO DE HORAS zeram HH disponível
+    base.loc[
+        base["Tipo"].isin(["FÉRIAS", "AFASTAMENTO", "BANCO DE HORAS"]),
+        "HH_Disponivel"
+    ] = 0
+
+# ============================================================
+# ABAS
+# ============================================================
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Resumo Geral",
+    "Relatório Diário",
+    "Resumo dos Afastamentos",
+    "Resumo Geral de Afastamentos"
+])
+
+# ============================================================
+# RESUMO GERAL
+# ============================================================
+with tab1:
+    if not base.empty:
+        resumo = base.groupby("Colaborador").agg(
+            Dias=("Data", "count"),
+            HH_Disponivel=("HH_Disponivel", "sum"),
+            HH_Programado=("HH_Programado", "sum")
+        ).reset_index()
+
+        resumo["%Carga"] = resumo.apply(
+            lambda r: r["HH_Programado"] / r["HH_Disponivel"]
+            if r["HH_Disponivel"] > 0 else 0,
+            axis=1
+        )
+
+        st.dataframe(resumo, use_container_width=True)
+
+# ============================================================
+# RELATÓRIO DIÁRIO
+# ============================================================
+with tab2:
+    if not base.empty:
+        diario = base.copy()
+        diario["%Carga Dia"] = diario.apply(
+            lambda r: r["HH_Programado"] / r["HH_Disponivel"]
+            if r["HH_Disponivel"] > 0 else 0,
+            axis=1
+        )
+        st.dataframe(diario, use_container_width=True)
+
+# ============================================================
+# RESUMO DOS AFASTAMENTOS
+# ============================================================
+with tab3:
+    if not st.session_state.ausencias.empty:
+        st.dataframe(st.session_state.ausencias, use_container_width=True)
+
+# ============================================================
+# RESUMO GERAL DE AFASTAMENTOS
+# ============================================================
+with tab4:
+    if not base.empty:
+        aus_h = (
+            base[base["Tipo"].isin(["FOLGA", "AFASTAMENTO"])]
+            .groupby(["Colaborador", "Tipo"])
+            .size()
+            .reset_index(name="Dias")
+        )
+
+        tabela = aus_h.pivot_table(
+            index="Colaborador",
+            columns="Tipo",
+            values="Dias",
+            fill_value=0
+        ).reset_index()
+
+        totais = base.groupby("Colaborador").agg(
+            HH_Prog=("HH_Programado", "sum"),
+            HH_Disp=("HH_Disponivel", "sum")
+        ).reset_index()
+
+        tabela = tabela.merge(totais, on="Colaborador", how="left")
+
+        tabela["% Ausência vs Programado"] = (
+            (tabela.get("FOLGA", 0) + tabela.get("AFASTAMENTO", 0)) * jornada_h
+        ) / tabela["HH_Prog"].replace(0, pd.NA)
+
+        tabela["% Ausência vs Disponível"] = (
+            (tabela.get("FOLGA", 0) + tabela.get("AFASTAMENTO", 0)) * jornada_h
+        ) / tabela["HH_Disp"].replace(0, pd.NA)
+
+        st.dataframe(tabela.fillna(0), use_container_width=True)
+
+# ============================================================
+# ENVIO DE EMAIL
+# ============================================================
+st.header("Enviar relatório por e-mail")
+
+emails = st.text_input("E-mails (separados por vírgula)")
+
+if st.button("Enviar relatório"):
+    msg = EmailMessage()
+    msg["Subject"] = "Relatório Planejamento de HH"
+    msg["From"] = "seu_email@empresa.com"
+    msg["To"] = emails
+    msg.set_content(
+        "Relatório gerado automaticamente pelo sistema de Planejamento de HH."
+    )
+
+    try:
+        with smtplib.SMTP("smtp.empresa.com", 25) as s:
+            s.send_message(msg)
+        st.success("E-mail enviado com sucesso")
+    except Exception as e:
+        st.error(f"Erro ao enviar e-mail: {e}")
