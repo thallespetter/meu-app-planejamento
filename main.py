@@ -33,7 +33,10 @@ def salvar_db(df):
 
 def carregar_folgas():
     if os.path.exists(FOLGAS_FILE):
-        return pd.read_parquet(FOLGAS_FILE)
+        df = pd.read_parquet(FOLGAS_FILE)
+        if not df.empty and "Data" in df.columns:
+            df["Data"] = pd.to_datetime(df["Data"]).dt.date
+        return df
     return pd.DataFrame(columns=["Colaborador", "Data", "Tipo"])
 
 
@@ -144,7 +147,8 @@ def extrair_dados_pdf_seguro(file_obj):
                                     "HH": hh_val,
                                     "Data": data_ref,
                                     "Ano": data_ref.year,
-                                    "Mês": data_ref.strftime("%m - %B")
+                                    "Mês": data_ref.strftime("%m - %B"),
+                                    "Arquivo": file_obj.name
                                 })
 
         doc.close()
@@ -180,6 +184,19 @@ if uploaded_files:
                     salvar_arquivos(st.session_state.arquivos_lidos)
                     st.rerun()
 
+# --- NOVO: EXCLUIR PDF CARREGADO ---
+if st.session_state.arquivos_lidos:
+    with st.sidebar.expander("🗑️ Excluir PDF Carregado"):
+        arq_para_excluir = st.selectbox("Selecionar Arquivo", st.session_state.arquivos_lidos)
+        if st.button("Confirmar Exclusão Arquivo"):
+            st.session_state.arquivos_lidos.remove(arq_para_excluir)
+            if not st.session_state.db_pd.empty:
+                st.session_state.db_pd = st.session_state.db_pd[st.session_state.db_pd["Arquivo"] != arq_para_excluir]
+            salvar_db(st.session_state.db_pd)
+            salvar_arquivos(st.session_state.arquivos_lidos)
+            st.success("Arquivo removido!")
+            st.rerun()
+
 # =========================================================
 # FILTROS
 # =========================================================
@@ -207,12 +224,12 @@ else:
 # LANÇAMENTO DE FOLGAS
 # =========================================================
 with st.sidebar.expander("🏖️ Lançar Ausência"):
-    c_f = st.selectbox("Colaborador", EQUIPE)
+    c_f = st.selectbox("Colaborador ", EQUIPE)
     tipo_f = st.selectbox("Tipo", TIPOS_FOLGA)
     d_i = st.date_input("Início")
     d_f = st.date_input("Fim")
 
-    if st.button("Salvar"):
+    if st.button("Salvar Ausência"):
         datas = []
         curr = d_i
         while curr <= d_f:
@@ -225,16 +242,32 @@ with st.sidebar.expander("🏖️ Lançar Ausência"):
 
         st.session_state.folgas = (
             pd.concat([st.session_state.folgas, pd.DataFrame(datas)])
-            .drop_duplicates()
+            .drop_duplicates(subset=["Colaborador", "Data"])
         )
 
         salvar_folgas(st.session_state.folgas)
-        st.success("Registro salvo com sucesso!")
+        st.success("Registro salvo!")
+
+# --- NOVO: EXCLUIR AUSÊNCIA ---
+if not st.session_state.folgas.empty:
+    with st.sidebar.expander("🗑️ Excluir Ausência"):
+        folgas_view = st.session_state.folgas.copy()
+        folgas_view["label"] = folgas_view["Colaborador"] + " - " + folgas_view["Data"].astype(str)
+        selecionado = st.selectbox("Selecionar Registro", folgas_view["label"].unique())
+        if st.button("Confirmar Exclusão Ausência"):
+            col_sel, data_sel = selecionado.split(" - ")
+            st.session_state.folgas = st.session_state.folgas[
+                ~((st.session_state.folgas["Colaborador"] == col_sel) & 
+                  (st.session_state.folgas["Data"].astype(str) == data_sel))
+            ]
+            salvar_folgas(st.session_state.folgas)
+            st.success("Ausência removida!")
+            st.rerun()
 
 # =========================================================
 # RESET
 # =========================================================
-if st.sidebar.button("🗑️ Resetar Sistema"):
+if st.sidebar.button("⚠️ Resetar Sistema Completo"):
     for f in [DB_FILE, FOLGAS_FILE, ARQS_FILE]:
         if os.path.exists(f):
             os.remove(f)
@@ -287,35 +320,58 @@ if not df_filtrado.empty:
     with t1:
         for d in sorted(dias_u, reverse=True):
             with st.expander(f"Programação {d.strftime('%d/%m/%Y')}"):
-                st.dataframe(
-                    df_filtrado[df_filtrado["Data"] == d]
-                    .groupby("Colaborador")["HH"]
-                    .sum()
-                    .reset_index(),
-                    use_container_width=True
-                )
+                # Filtrar dados do dia
+                df_dia = df_filtrado[df_filtrado["Data"] == d]
+                
+                # Criar base com todos da equipe filtrada para garantir que apareçam mesmo sem HH
+                resumo_dia = []
+                for p in f_colab:
+                    hh_prog = df_dia[df_dia["Colaborador"] == p]["HH"].sum()
+                    
+                    # Verificar se está de folga no dia
+                    is_folga = not st.session_state.folgas[
+                        (st.session_state.folgas["Colaborador"] == p) & 
+                        (st.session_state.folgas["Data"] == d)
+                    ].empty
+                    
+                    hh_plan = 0.0 if is_folga else jornada_h
+                    hh_n_prog = max(0.0, hh_plan - hh_prog)
+                    perc = (hh_prog / hh_plan * 100) if hh_plan > 0 else 0.0
+                    
+                    resumo_dia.append({
+                        "Colaborador": p,
+                        "HH Planejado": hh_plan,
+                        "HH Programado": round(hh_prog, 2),
+                        "HH Não Programado": round(hh_n_prog, 2),
+                        "% Programado": f"{perc:.1f}%"
+                    })
+                
+                st.dataframe(pd.DataFrame(resumo_dia), use_container_width=True)
 
     with t2:
         st.dataframe(st.session_state.folgas, use_container_width=True)
 
     with t3:
-        resumo = (
-            st.session_state.folgas
-            .groupby(["Colaborador", "Tipo"])
-            .size()
-            .reset_index(name="Dias")
-        )
-        resumo["Horas"] = resumo["Dias"] * jornada_h
+        if not st.session_state.folgas.empty:
+            resumo = (
+                st.session_state.folgas
+                .groupby(["Colaborador", "Tipo"])
+                .size()
+                .reset_index(name="Dias")
+            )
+            resumo["Horas"] = resumo["Dias"] * jornada_h
 
-        tabela_resumo = resumo.pivot_table(
-            index="Colaborador",
-            columns="Tipo",
-            values="Horas",
-            aggfunc="sum",
-            fill_value=0
-        ).reset_index()
+            tabela_resumo = resumo.pivot_table(
+                index="Colaborador",
+                columns="Tipo",
+                values="Horas",
+                aggfunc="sum",
+                fill_value=0
+            ).reset_index()
 
-        st.dataframe(tabela_resumo, use_container_width=True)
+            st.dataframe(tabela_resumo, use_container_width=True)
+        else:
+            st.info("Nenhuma ausência registrada.")
 
 else:
     st.info("Carregue PDFs para iniciar o painel.")
