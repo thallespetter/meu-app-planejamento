@@ -28,7 +28,7 @@ TIPOS_AUSENCIA = [
     "FOLGA", "FÉRIAS", "AFASTAMENTO", "BANCO DE HORAS EXTRAS"
 ]
 
-TIPOS_DESCONTA = ["FOLGA", "FÉRIAS", "AFASTAMENTO"]
+TIPOS_AUSENCIA_CALCULO = ["FOLGA", "AFASTAMENTO"]
 
 # ======================================================
 # PERSISTÊNCIA
@@ -52,7 +52,7 @@ def save_json(data, path):
         json.dump(data, f)
 
 # ======================================================
-# SESSION STATE (NUNCA CONDICIONAR A FILTRO)
+# SESSION STATE
 # ======================================================
 if "db" not in st.session_state:
     st.session_state.db = load_parquet(DB_FILE)
@@ -122,9 +122,9 @@ def extrair_pdf(file):
     return pd.DataFrame(dados)
 
 # ======================================================
-# SIDEBAR – PDFs (UPLOAD + DELETE SEMPRE VISÍVEL)
+# SIDEBAR – PDFs
 # ======================================================
-st.sidebar.header("📁 Gestão de PDFs")
+st.sidebar.header("📁 PDFs")
 
 files = st.sidebar.file_uploader(
     "Carregar PDFs", type="pdf", accept_multiple_files=True
@@ -143,21 +143,8 @@ if files:
                 save_json(st.session_state.arquivos, ARQS_FILE)
                 st.rerun()
 
-st.sidebar.markdown("### 🗑️ Apagar PDF carregado")
-pdf_del = st.sidebar.selectbox(
-    "Selecione o PDF",
-    [""] + st.session_state.arquivos
-)
-
-if st.sidebar.button("Excluir PDF") and pdf_del:
-    st.session_state.arquivos.remove(pdf_del)
-    save_json(st.session_state.arquivos, ARQS_FILE)
-    # OBS: PDF não remove HH históricos por segurança
-    st.success("PDF removido da lista")
-    st.rerun()
-
 # ======================================================
-# SIDEBAR – AUSÊNCIAS (CADASTRAR + EXCLUIR SEMPRE VISÍVEL)
+# SIDEBAR – AUSÊNCIAS
 # ======================================================
 st.sidebar.header("🏖️ Ausências")
 
@@ -180,25 +167,8 @@ if st.sidebar.button("Salvar Ausência"):
     save_parquet(st.session_state.aus, AUS_FILE)
     st.success("Ausência registrada")
 
-st.sidebar.markdown("### 🗑️ Excluir ausência específica")
-if not st.session_state.aus.empty:
-    idx = st.sidebar.selectbox(
-        "Registro",
-        st.session_state.aus.index,
-        format_func=lambda i:
-        f"{st.session_state.aus.loc[i,'Colaborador']} | "
-        f"{st.session_state.aus.loc[i,'Data']} | "
-        f"{st.session_state.aus.loc[i,'Tipo']}"
-    )
-
-    if st.sidebar.button("Excluir ausência"):
-        st.session_state.aus = st.session_state.aus.drop(idx)
-        save_parquet(st.session_state.aus, AUS_FILE)
-        st.success("Ausência removida")
-        st.rerun()
-
 # ======================================================
-# FILTROS (APENAS PARA VISUALIZAÇÃO)
+# FILTROS
 # ======================================================
 st.sidebar.markdown("---")
 st.sidebar.header("🔍 Filtros")
@@ -228,72 +198,64 @@ if not dbf.empty:
     dias = sorted(dbf["Data"].unique())
     n_dias = len(dias)
 
-    # ================= RESUMO GERAL =================
-    st.subheader("📈 Relatório Geral")
+    # ================= RELATÓRIO DIÁRIO =================
+    st.subheader("📅 Relatório Diário")
+
+    for d in dias:
+        with st.expander(d.strftime("%d/%m/%Y")):
+            linhas = []
+            for p in f_col:
+                hh_prog = dbf[
+                    (dbf["Colaborador"] == p) &
+                    (dbf["Data"] == d)
+                ]["HH"].sum()
+
+                aus_dia = st.session_state.aus[
+                    (st.session_state.aus["Colaborador"] == p) &
+                    (st.session_state.aus["Data"] == d) &
+                    (st.session_state.aus["Tipo"].isin(TIPOS_AUSENCIA_CALCULO))
+                ].shape[0]
+
+                hh_disp = jornada - (aus_dia * jornada)
+                carga = (hh_prog / hh_disp * 100) if hh_disp > 0 else 0
+
+                linhas.append({
+                    "Colaborador": p,
+                    "HH Disponível": hh_disp,
+                    "HH Programado": hh_prog,
+                    "HH Não Programado": hh_disp - hh_prog,
+                    "% Carga": round(carga, 1)
+                })
+
+            st.dataframe(pd.DataFrame(linhas), use_container_width=True)
+
+    # ================= RESUMO DE AUSÊNCIAS =================
+    st.subheader("📊 Resumo de Ausências")
 
     resumo = []
     for p in f_col:
-        hh_prog = dbf[dbf["Colaborador"] == p]["HH"].sum()
+        hh_prog_total = dbf[dbf["Colaborador"] == p]["HH"].sum()
 
         dias_aus = st.session_state.aus[
             (st.session_state.aus["Colaborador"] == p) &
             (st.session_state.aus["Data"].isin(dias)) &
-            (st.session_state.aus["Tipo"].isin(TIPOS_DESCONTA))
+            (st.session_state.aus["Tipo"].isin(TIPOS_AUSENCIA_CALCULO))
         ].shape[0]
 
-        hh_disp = (n_dias - dias_aus) * jornada
-        carga = (hh_prog / hh_disp * 100) if hh_disp > 0 else 0
+        horas_aus = dias_aus * jornada
+        hh_disp_total = (n_dias * jornada) - horas_aus
 
         resumo.append({
             "Colaborador": p,
-            "HH Disponível": hh_disp,
-            "HH Programado": hh_prog,
-            "HH Não Programado": hh_disp - hh_prog,
-            "% Carga": round(carga, 1)
+            "Horas de Ausência": horas_aus,
+            "% Ausência vs Programado": round(
+                (horas_aus / hh_prog_total * 100) if hh_prog_total > 0 else 0, 1
+            ),
+            "% Ausência vs Disponível": round(
+                (horas_aus / hh_disp_total * 100) if hh_disp_total > 0 else 0, 1
+            )
         })
 
     st.dataframe(pd.DataFrame(resumo), use_container_width=True)
-
-    # ================= RESUMO AUSÊNCIAS =================
-    st.subheader("📊 Resumo de Ausências")
-
-    aus = st.session_state.aus[
-        st.session_state.aus["Colaborador"].isin(f_col)
-    ]
-
-    if not aus.empty:
-        res = aus.groupby(
-            ["Colaborador", "Tipo"]
-        ).size().reset_index(name="Dias")
-
-        res["Horas"] = res["Dias"] * jornada
-
-        tabela = res.pivot_table(
-            index="Colaborador",
-            columns="Tipo",
-            values="Horas",
-            fill_value=0
-        ).reset_index()
-
-        tabela["Total Horas Ausência"] = tabela[
-            [c for c in tabela.columns if c in TIPOS_DESCONTA]
-        ].sum(axis=1)
-
-        prog = dbf.groupby("Colaborador")["HH"].sum()
-        disp = resumo_df = pd.DataFrame(resumo).set_index("Colaborador")["HH Disponível"]
-
-        tabela["% Ausência vs Programado"] = tabela["Colaborador"].apply(
-            lambda c: (tabela.loc[tabela["Colaborador"] == c,
-                                  "Total Horas Ausência"].values[0] /
-                       prog.get(c, 1)) * 100
-        )
-
-        tabela["% Ausência vs Disponível"] = tabela["Colaborador"].apply(
-            lambda c: (tabela.loc[tabela["Colaborador"] == c,
-                                  "Total Horas Ausência"].values[0] /
-                       disp.get(c, 1)) * 100
-        )
-
-        st.dataframe(tabela, use_container_width=True)
 else:
     st.info("Carregue PDFs para visualizar os dados.")
