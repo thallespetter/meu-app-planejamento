@@ -1,5 +1,5 @@
 # ============================================================
-# main.py — APLICATIVO DE PLANEJAMENTO DE HH (VERSÃO ESTÁVEL)
+# main.py — APLICATIVO DE PLANEJAMENTO DE HH (VERSÃO CORRIGIDA)
 # ============================================================
 
 import streamlit as st
@@ -136,4 +136,60 @@ st.header("Ausências")
 
 with st.expander("➕ Lançar / 🗑️ Excluir Ausência", expanded=False):
     c = st.selectbox("Colaborador", colabs)
-    t = st.selectbox("Tipo de Ausência
+    t = st.selectbox("Tipo de Ausência", TIPOS_AUSENCIA)
+    d_ini = st.date_input("Data inicial")
+    d_fim = st.date_input("Data final")
+
+    if st.button("Registrar ausência"):
+        datas = pd.date_range(d_ini, d_fim, freq="D")
+        novos = pd.DataFrame({
+            "Colaborador": c,
+            "Data": datas,
+            "Tipo": t
+        })
+        st.session_state.ausencias = (
+            pd.concat([st.session_state.ausencias, novos])
+            .drop_duplicates()
+        )
+        save_df(st.session_state.ausencias, AUS_FILE)
+        st.success("Ausência registrada")
+
+    if not st.session_state.ausencias.empty:
+        idx = st.selectbox(
+            "Excluir ausência",
+            st.session_state.ausencias.index,
+            format_func=lambda i: (
+                f"{st.session_state.ausencias.loc[i,'Colaborador']} | "
+                f"{st.session_state.ausencias.loc[i,'Tipo']} | "
+                f"{pd.to_datetime(st.session_state.ausencias.loc[i,'Data']).date()}"
+            )
+        )
+        if st.button("Excluir registro selecionado"):
+            st.session_state.ausencias = st.session_state.ausencias.drop(idx)
+            save_df(st.session_state.ausencias, AUS_FILE)
+            st.warning("Ausência removida")
+
+# ============================================================
+# BASE DIÁRIA (SEMPRE EXISTE)
+# ============================================================
+base = pd.DataFrame(
+    columns=[
+        "Colaborador", "Data",
+        "HH_Programado", "HH_Disponivel",
+        "Tipo"
+    ]
+)
+
+if not df.empty:
+    prog = (
+        df.groupby(["Colaborador", "Data"])
+        .agg(HH_Programado=("HH", "sum"))
+        .reset_index()
+    )
+
+    prog["HH_Disponivel"] = jornada_h
+
+    aus = st.session_state.ausencias.copy()
+    aus["Data"] = pd.to_datetime(aus["Data"])
+
+    base = prog.merge(aus, on=["Colaborador",]()
