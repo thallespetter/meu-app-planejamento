@@ -1,321 +1,245 @@
 import streamlit as st
 import pandas as pd
-import fitz  # PyMuPDF
+import fitz
 import re
 import unicodedata
 import os
 import json
 from datetime import datetime, timedelta
 
-# =========================================================
-# CONFIGURAÇÃO DA PÁGINA
-# =========================================================
+# ======================================================
+# CONFIGURAÇÃO
+# ======================================================
 st.set_page_config(page_title="Gestão HH Automação", layout="wide")
 
-# =========================================================
-# PERSISTÊNCIA DE DADOS
-# =========================================================
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_FILE = f"{DATA_DIR}/db_programacao.parquet"
-FOLGAS_FILE = f"{DATA_DIR}/folgas.parquet"
+FOLGAS_FILE = f"{DATA_DIR}/ausencias.parquet"
 ARQS_FILE = f"{DATA_DIR}/arquivos_lidos.json"
-
-
-def carregar_db():
-    return pd.read_parquet(DB_FILE) if os.path.exists(DB_FILE) else pd.DataFrame()
-
-
-def salvar_db(df):
-    df.to_parquet(DB_FILE, index=False)
-
-
-def carregar_folgas():
-    if os.path.exists(FOLGAS_FILE):
-        return pd.read_parquet(FOLGAS_FILE)
-    return pd.DataFrame(columns=["Colaborador", "Data", "Tipo"])
-
-
-def salvar_folgas(df):
-    df.to_parquet(FOLGAS_FILE, index=False)
-
-
-def carregar_arquivos():
-    if os.path.exists(ARQS_FILE):
-        with open(ARQS_FILE, "r") as f:
-            return json.load(f)
-    return []
-
-
-def salvar_arquivos(lista):
-    with open(ARQS_FILE, "w") as f:
-        json.dump(lista, f)
-
-
-# =========================================================
-# INICIALIZAÇÃO DE SESSÃO
-# =========================================================
-if "db_pd" not in st.session_state:
-    st.session_state.db_pd = carregar_db()
-
-if "folgas" not in st.session_state:
-    st.session_state.folgas = carregar_folgas()
-
-if "arquivos_lidos" not in st.session_state:
-    st.session_state.arquivos_lidos = carregar_arquivos()
-
-# =========================================================
-# DADOS FIXOS
-# =========================================================
-st.title("📊 Gestão de Planejamento - Automação")
 
 EQUIPE = [
     "ALESSANDRO", "ANDRÉ P", "DIENIFER", "ELCIO",
     "EDILON", "GILMAR", "JOSÉ GERALDO", "SAMUELL"
 ]
 
-TIPOS_FOLGA = ["FOLGA", "FÉRIAS", "AFASTAMENTO"]
+TIPOS_AUSENCIA = [
+    "FOLGA",
+    "FÉRIAS",
+    "AFASTAMENTO",
+    "BANCO DE HORAS EXTRAS"
+]
 
+TIPOS_DESCONTA_HH = ["FOLGA", "FÉRIAS", "AFASTAMENTO"]
 
-# =========================================================
-# FUNÇÕES AUXILIARES
-# =========================================================
+# ======================================================
+# PERSISTÊNCIA
+# ======================================================
+def carregar_parquet(path, cols=None):
+    if os.path.exists(path):
+        return pd.read_parquet(path)
+    return pd.DataFrame(columns=cols if cols else [])
+
+def salvar_parquet(df, path):
+    df.to_parquet(path, index=False)
+
+def carregar_json(path):
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return []
+
+def salvar_json(data, path):
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+# ======================================================
+# SESSION STATE
+# ======================================================
+if "db" not in st.session_state:
+    st.session_state.db = carregar_parquet(DB_FILE)
+
+if "ausencias" not in st.session_state:
+    st.session_state.ausencias = carregar_parquet(
+        FOLGAS_FILE, ["Colaborador", "Data", "Tipo"]
+    )
+
+if "arquivos" not in st.session_state:
+    st.session_state.arquivos = carregar_json(ARQS_FILE)
+
+# ======================================================
+# FUNÇÕES AUX
+# ======================================================
 def normalizar(txt):
-    if not txt or pd.isna(txt):
-        return ""
     return "".join(
         c for c in unicodedata.normalize("NFD", str(txt).upper())
         if unicodedata.category(c) != "Mn"
-    ).strip()
+    )
 
-
-def identificar_colab(texto):
-    t = normalizar(texto)
-    if not t:
-        return None
+def identificar_colab(txt):
+    t = normalizar(txt)
     if "GERALDO" in t:
         return "JOSÉ GERALDO"
-    for nome in EQUIPE:
-        if normalizar(nome) in t:
-            return nome
+    for n in EQUIPE:
+        if normalizar(n) in t:
+            return n
     return None
 
+def extrair_pdf(file):
+    doc = fitz.open(stream=file.getvalue(), filetype="pdf")
+    dados = []
 
-def extrair_dados_pdf_seguro(file_obj):
-    try:
-        file_bytes = file_obj.getvalue()
-        if not file_bytes:
-            return pd.DataFrame()
+    data_ref = datetime.now().date()
+    txt = doc[0].get_text()
+    dt = re.search(r"\d{2}/\d{2}/\d{2}", txt)
+    if dt:
+        data_ref = datetime.strptime(dt.group(), "%d/%m/%y").date()
 
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        dados_lista = []
-        data_ref = datetime.now().date()
+    for p in doc:
+        for t in p.find_tables():
+            df = t.to_pandas()
+            df.columns = df.columns.str.lower()
 
-        primeira_pag_texto = doc[0].get_text()
-        dt_match = re.search(r"\d{2}/\d{2}/\d{2}", primeira_pag_texto)
-        if dt_match:
-            try:
-                data_ref = datetime.strptime(dt_match.group(), "%d/%m/%y").date()
-            except:
-                pass
+            sup = next((c for c in df.columns if "superv" in c), None)
+            rec = next((c for c in df.columns if "recursos" in c), None)
+            dur = next((c for c in df.columns if "dura" in c), None)
 
-        for page in doc:
-            tabs = page.find_tables()
-            for tab in tabs:
-                df = tab.to_pandas()
-                df.columns = [str(c).lower().replace("\n", " ") for c in df.columns]
+            if sup and rec and dur:
+                df = df[df[sup].astype(str).str.contains("Automação", case=False)]
+                for _, r in df.iterrows():
+                    hh = int(re.findall(r"\d+", str(r[dur]))[0]) / 60
+                    for nome in str(r[rec]).split(";"):
+                        col = identificar_colab(nome)
+                        if col:
+                            dados.append({
+                                "Colaborador": col,
+                                "HH": hh,
+                                "Data": data_ref,
+                                "Ano": data_ref.year,
+                                "Mês": data_ref.strftime("%m - %B")
+                            })
 
-                idx_sup = next((c for c in df.columns if "superv" in c), None)
-                idx_rec = next((c for c in df.columns if "recursos" in c or "nomes" in c), None)
-                idx_dur = next((c for c in df.columns if "dura" in c), None)
+    return pd.DataFrame(dados)
 
-                if idx_sup and idx_rec and idx_dur:
-                    df_aut = df[df[idx_sup].astype(str).str.contains("Automação", case=False, na=False)]
-                    for _, row in df_aut.iterrows():
-                        nums = re.findall(r"\d+", str(row[idx_dur]))
-                        hh_val = int(nums[0]) / 60 if nums else 0
-                        nomes = str(row[idx_rec]).replace("\n", " ").split(";")
-                        for n in nomes:
-                            colab = identificar_colab(n)
-                            if colab:
-                                dados_lista.append({
-                                    "Colaborador": colab,
-                                    "HH": hh_val,
-                                    "Data": data_ref,
-                                    "Ano": data_ref.year,
-                                    "Mês": data_ref.strftime("%m - %B")
-                                })
+# ======================================================
+# SIDEBAR – UPLOAD / DELETE ARQUIVOS
+# ======================================================
+st.sidebar.header("📁 PDFs")
 
-        doc.close()
-        return pd.DataFrame(dados_lista)
+files = st.sidebar.file_uploader("Carregar PDFs", type="pdf", accept_multiple_files=True)
 
-    except Exception as e:
-        st.error(f"Erro ao processar PDF: {e}")
-        return pd.DataFrame()
+if files:
+    for f in files:
+        if f.name not in st.session_state.arquivos:
+            df = extrair_pdf(f)
+            st.session_state.db = pd.concat([st.session_state.db, df]).drop_duplicates()
+            st.session_state.arquivos.append(f.name)
+            salvar_parquet(st.session_state.db, DB_FILE)
+            salvar_json(st.session_state.arquivos, ARQS_FILE)
+            st.rerun()
 
-
-# =========================================================
-# SIDEBAR – ENTRADA DE DADOS
-# =========================================================
-st.sidebar.header("📁 Entrada de Dados")
-uploaded_files = st.sidebar.file_uploader(
-    "Carregar PDFs", type="pdf", accept_multiple_files=True
-)
-
-jornada_h = st.sidebar.number_input("Jornada Diária (HH)", value=8.0)
-
-if uploaded_files:
-    for f in uploaded_files:
-        if f.name not in st.session_state.arquivos_lidos:
-            with st.spinner(f"Lendo {f.name}..."):
-                res = extrair_dados_pdf_seguro(f)
-                if not res.empty:
-                    st.session_state.db_pd = (
-                        pd.concat([st.session_state.db_pd, res], ignore_index=True)
-                        .drop_duplicates()
-                    )
-                    st.session_state.arquivos_lidos.append(f.name)
-                    salvar_db(st.session_state.db_pd)
-                    salvar_arquivos(st.session_state.arquivos_lidos)
-                    st.rerun()
-
-# =========================================================
-# FILTROS
-# =========================================================
-st.sidebar.markdown("---")
-st.sidebar.header("🔍 Filtros")
-
-if not st.session_state.db_pd.empty:
-    db = st.session_state.db_pd
-    anos = sorted(db["Ano"].unique())
-    meses = sorted(db["Mês"].unique(), key=lambda x: x.split(" - ")[0])
-
-    f_ano = st.sidebar.multiselect("Ano", anos, default=anos)
-    f_mes = st.sidebar.multiselect("Mês", meses, default=meses)
-    f_colab = st.sidebar.multiselect("Colaborador", EQUIPE, default=EQUIPE)
-
-    df_filtrado = db[
-        (db["Ano"].isin(f_ano)) &
-        (db["Mês"].isin(f_mes)) &
-        (db["Colaborador"].isin(f_colab))
+st.sidebar.markdown("### 🗑️ Remover PDF")
+arq_del = st.sidebar.selectbox("Arquivo", [""] + st.session_state.arquivos)
+if st.sidebar.button("Excluir PDF") and arq_del:
+    st.session_state.db = st.session_state.db[
+        st.session_state.db["Data"] != st.session_state.db[
+            st.session_state.db["Data"].index
+        ]
     ]
-else:
-    df_filtrado = pd.DataFrame()
-
-# =========================================================
-# LANÇAMENTO DE FOLGAS
-# =========================================================
-with st.sidebar.expander("🏖️ Lançar Ausência"):
-    c_f = st.selectbox("Colaborador", EQUIPE)
-    tipo_f = st.selectbox("Tipo", TIPOS_FOLGA)
-    d_i = st.date_input("Início")
-    d_f = st.date_input("Fim")
-
-    if st.button("Salvar"):
-        datas = []
-        curr = d_i
-        while curr <= d_f:
-            datas.append({
-                "Colaborador": c_f,
-                "Data": curr,
-                "Tipo": tipo_f
-            })
-            curr += timedelta(days=1)
-
-        st.session_state.folgas = (
-            pd.concat([st.session_state.folgas, pd.DataFrame(datas)])
-            .drop_duplicates()
-        )
-
-        salvar_folgas(st.session_state.folgas)
-        st.success("Registro salvo com sucesso!")
-
-# =========================================================
-# RESET
-# =========================================================
-if st.sidebar.button("🗑️ Resetar Sistema"):
-    for f in [DB_FILE, FOLGAS_FILE, ARQS_FILE]:
-        if os.path.exists(f):
-            os.remove(f)
-    st.session_state.clear()
+    st.session_state.arquivos.remove(arq_del)
+    salvar_parquet(st.session_state.db, DB_FILE)
+    salvar_json(st.session_state.arquivos, ARQS_FILE)
     st.rerun()
 
-# =========================================================
+# ======================================================
+# AUSÊNCIAS – CADASTRAR / EXCLUIR
+# ======================================================
+st.sidebar.header("🏖️ Ausências")
+
+col = st.sidebar.selectbox("Colaborador", EQUIPE)
+tipo = st.sidebar.selectbox("Tipo", TIPOS_AUSENCIA)
+di = st.sidebar.date_input("Início")
+df = st.sidebar.date_input("Fim")
+
+if st.sidebar.button("Salvar Ausência"):
+    datas = [{"Colaborador": col, "Data": d, "Tipo": tipo}
+             for d in pd.date_range(di, df)]
+    st.session_state.ausencias = pd.concat(
+        [st.session_state.ausencias, pd.DataFrame(datas)]
+    ).drop_duplicates()
+    salvar_parquet(st.session_state.ausencias, FOLGAS_FILE)
+    st.success("Salvo!")
+
+st.sidebar.markdown("### 🗑️ Excluir Ausência")
+if not st.session_state.ausencias.empty:
+    idx = st.sidebar.selectbox(
+        "Registro",
+        st.session_state.ausencias.index,
+        format_func=lambda i: f"{st.session_state.ausencias.loc[i].to_dict()}"
+    )
+    if st.sidebar.button("Excluir Registro"):
+        st.session_state.ausencias = st.session_state.ausencias.drop(idx)
+        salvar_parquet(st.session_state.ausencias, FOLGAS_FILE)
+        st.rerun()
+
+# ======================================================
 # DASHBOARD
-# =========================================================
-if not df_filtrado.empty:
-    st.subheader("📈 Indicadores Consolidados")
+# ======================================================
+st.title("📊 Gestão HH Automação")
 
-    dias_u = sorted(df_filtrado["Data"].unique())
-    n_dias = len(dias_u)
-    total_prog = df_filtrado["HH"].sum()
+jornada = st.number_input("Jornada Diária (h)", value=8.0)
 
-    tabela = []
-    total_disp = 0
+if not st.session_state.db.empty:
+    dias = sorted(st.session_state.db["Data"].unique())
 
-    for p in f_colab:
-        hh_p = df_filtrado[df_filtrado["Colaborador"] == p]["HH"].sum()
-        dias_aus = st.session_state.folgas[
-            (st.session_state.folgas["Colaborador"] == p) &
-            (st.session_state.folgas["Data"].isin(dias_u))
-        ].shape[0]
+    st.subheader("📅 Detalhe Diário")
+    for d in dias:
+        with st.expander(d.strftime("%d/%m/%Y")):
+            linhas = []
+            for p in EQUIPE:
+                hh_prog = st.session_state.db[
+                    (st.session_state.db["Colaborador"] == p) &
+                    (st.session_state.db["Data"] == d)
+                ]["HH"].sum()
 
-        hh_disp = (n_dias - dias_aus) * jornada_h
-        total_disp += hh_disp
-        carga = (hh_p / hh_disp * 100) if hh_disp > 0 else 0
+                aus = st.session_state.ausencias[
+                    (st.session_state.ausencias["Colaborador"] == p) &
+                    (st.session_state.ausencias["Data"] == d) &
+                    (st.session_state.ausencias["Tipo"].isin(TIPOS_DESCONTA_HH))
+                ].shape[0]
 
-        tabela.append({
-            "Colaborador": p,
-            "Dias Úteis": n_dias - dias_aus,
-            "HH Disponível": round(hh_disp, 1),
-            "HH Programado": round(hh_p, 1),
-            "Saldo": round(hh_disp - hh_p, 1),
-            "% Carga": f"{carga:.1f}%"
-        })
+                hh_disp = jornada - (aus * jornada)
+                carga = (hh_prog / hh_disp * 100) if hh_disp > 0 else 0
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Dias Computados", n_dias)
-    c2.metric("HH Disponível", f"{total_disp:.1f}")
-    c3.metric("HH Programado", f"{total_prog:.1f}")
-    c4.metric("% Carga Total", f"{(total_prog / total_disp * 100) if total_disp > 0 else 0:.1f}%")
+                linhas.append({
+                    "Colaborador": p,
+                    "HH Disponível": round(hh_disp, 1),
+                    "HH Programado": round(hh_prog, 1),
+                    "HH Não Programado": round(hh_disp - hh_prog, 1),
+                    "% Carga": f"{carga:.1f}%"
+                })
 
-    st.table(pd.DataFrame(tabela))
+            st.dataframe(pd.DataFrame(linhas), use_container_width=True)
 
-    t1, t2, t3 = st.tabs(["📅 Detalhe Diário", "🏖️ Ausências", "📊 Resumo de Ausências"])
+    st.subheader("📊 Resumo de Ausências")
+    resumo = st.session_state.ausencias.groupby(
+        ["Colaborador", "Tipo"]
+    ).size().reset_index(name="Dias")
 
-    with t1:
-        for d in sorted(dias_u, reverse=True):
-            with st.expander(f"Programação {d.strftime('%d/%m/%Y')}"):
-                st.dataframe(
-                    df_filtrado[df_filtrado["Data"] == d]
-                    .groupby("Colaborador")["HH"]
-                    .sum()
-                    .reset_index(),
-                    use_container_width=True
-                )
+    resumo["Horas"] = resumo["Dias"] * jornada
 
-    with t2:
-        st.dataframe(st.session_state.folgas, use_container_width=True)
+    tabela = resumo.pivot_table(
+        index="Colaborador",
+        columns="Tipo",
+        values="Horas",
+        fill_value=0
+    ).reset_index()
 
-    with t3:
-        resumo = (
-            st.session_state.folgas
-            .groupby(["Colaborador", "Tipo"])
-            .size()
-            .reset_index(name="Dias")
-        )
-        resumo["Horas"] = resumo["Dias"] * jornada_h
+    prog = st.session_state.db.groupby("Colaborador")["HH"].sum()
+    disp = len(dias) * jornada
 
-        tabela_resumo = resumo.pivot_table(
-            index="Colaborador",
-            columns="Tipo",
-            values="Horas",
-            aggfunc="sum",
-            fill_value=0
-        ).reset_index()
+    tabela["% Ausência vs Programado"] = tabela[EQUIPE].sum(axis=1) / prog * 100
+    tabela["% Ausência vs Disponível"] = tabela[EQUIPE].sum(axis=1) / disp * 100
 
-        st.dataframe(tabela_resumo, use_container_width=True)
-
-else:
-    st.info("Carregue PDFs para iniciar o painel.")
+    st.dataframe(tabela, use_container_width=True)
